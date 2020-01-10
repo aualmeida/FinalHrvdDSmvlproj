@@ -1,0 +1,334 @@
+---
+title: "Movielens Capstone Project"
+author: "Aurelius Ferdinand Almeida"
+date: "1/9/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+  This analysis is done for a capstone project submission as part of the Harvard Data science Professional Certification. The dataset used is the Movielens dataset created by [Grouplens](http://grouplens.org/datasets/movielens/10m/). This is the 10 Million record version of the dataset and contains millions of ratings provided by users for a large set of movies. A standard code has been provided that procures the data from the grouplens website, formats and partitions it into a training set named 'edx' with 9,000,055 records and a test set named 'validation' containing 999,999 records. The code can be found in Methods and Analysis below. 
+
+  + ### Objectives
+The key objective of this project is to successfully train a machine learning model on the edx dataset and then predict ratings on the validation dataset with an **RMSE <= 0.8649**.
+
+  + ### Summary
+The project has provided multiple learning avenues and also presented several challenges to be overcome. The methods and analysis section elaborates these points further. Models that were applied but were not successful in meeting the required RMSE threshold have been discussed in brief. The final model chosen for this purpose was built using the [recosystem](https://cran.r-project.org/web/packages/recosystem/index.html) package. It achieved a **RSME of 0.78267** and is detailed in the results section. The report concludes with notes on the project, its limitations and possible future work. 
+
+
+## Methods and Analysis
+
+  + ### Getting Started
+  Any analysis requires the right tools to be made available. In R these are the additional libraries and packages, the code chunk below will install if needed and load the required libraries
+
+
+```{r Load-install packages, eval=TRUE, message=FALSE, warning=FALSE, include=TRUE, results='hide'}
+#Installing if necessary and loading the required packages
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+if(!require(foreach)) install.packages("foreach", repos = "http://cran.us.r-project.org")
+if(!require(MASS)) install.packages("MASS", repos = "http://cran.us.r-project.org")
+if(!require(gam)) install.packages("gam", repos = "http://cran.us.r-project.org")
+if(!require(pls)) install.packages("pls", repos = "http://cran.us.r-project.org")
+```
+
+The standard code provided to generate the edx and validation datasets is below.
+
+```{r Code from edx, eval=TRUE, include=TRUE}
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+
+  + ### Overview of the dataset
+  
+  The edx(train) and validation(test) datasets have a similar structure and format with a differing number of observations.The characteristics of the dataset can be viewed by using the code below
+```{r Structure, eval=TRUE, include=TRUE}
+# View structure of the dataset
+str(edx)
+```
+  
+  The summary function will provide additional useful information regarding the dataset. The first 5 rows of the dataset can be viewed using the below code
+```{r, eval=TRUE, include=TRUE}
+#View summary of the dataset
+summary(edx)
+
+# View first 5 rows of the dataset
+
+head(edx,5)
+```
+
+The dataset has 6 variables of which 'rating' is the variable to be predicted and 'userId' and 'movieId' are the primary predictors. From the remaining variables genres and timestamp are also possible predictors to be used. An immediate observation from this dataset is the number of records, at just over 9 million it is anticipated that there will be a substantial computational burden with model application using a standard laptop.Delving further into the dataset the summarise function helps to identify the number of unique users and movies
+
+```{r,  eval=TRUE, include=TRUE}
+# identify unique users and movies
+edx %>% 
+  summarize(users = n_distinct(userId),
+            movies = n_distinct(movieId))
+```
+
+When multiplied 10677 unique movies and 69878 unique users the number of expected ratings would be several order of magnitudes larger that the current number of records. This indicates that not all movies have been rated and not all users may have provided ratings. A visualisation of these distributions can shed more light on this point
+
+```{r, eval=TRUE, include=TRUE}
+# plot distribution of ratings by movieId
+
+edx %>% count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram( bins=30, fill = "blue", color = "black") +
+  scale_x_log10()+
+  ggtitle("Distribution or ratings by movieID")
+
+# plot distribution of ratings by userId
+
+edx %>% count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram( bins=30, fill = "green", color = "red") +
+  scale_x_log10()+
+  ggtitle("Distribution or ratings by userID")
+
+```
+
+Analysis of these distributions indicate that ratings distribution among movies is unequal with some movies getting rated far more than others. A similar case is also seen in the distribution of ratings by userId, some users have provided a large number of ratings while there are others with almost none.The rating distribution in itself can be visualised using a simple bar plot as below.
+
+```{r, eval=TRUE, include=TRUE}
+# Using a bar plot to visualise rating distribution
+edx %>% group_by(rating) %>% 
+  ggplot(aes(rating)) + 
+  geom_bar(fill = "yellow", color = "red") +
+    ggtitle("Distribution or ratings")
+```
+
+The plot shows that are there are 10 ratings values from 0.5 to 5 which correspond with the system of 5 star ratings used to grade movies by users. In general there are more average to good ratings than there are poor, also full star ratings are more likely than half star ratings.
+
+
++ ### Creating the function to test RMSE
+  
+  A standardised function will be used to evaluate the root mean squared error of the model and will be created using the below provided code
+  
+```{r, eval=TRUE, include=TRUE}
+# Create funtion that will calculate RMSE
+mvl_RMSE <- function(true_ratings,predicted_ratings){
+  sqrt(mean((true_ratings-predicted_ratings)^2))
+}
+```
+  
+
+
++ ### Application of Machine learning models
+
+In chapter [33.7](https://rafalab.github.io/dsbook/large-datasets.html#recommendation-systems) of the book "Introduction to Data science", [Prof Rafael Irizarry](http://rafalab.github.io/) has explained recommendation systems with an example of the Netflix challenge and a subset of the movielens dataset. Estimates were generated using summary calculations that indicated using user effects and movie effects in the model can achieve the desired RMSE. The analysis will consider these assumptions and proceed. The validation dataset will be reserved only for the final test of RMSE, the edx dataset will be used for all initial training and testing purposes. Given the number of observations in the edx dataset, it is advisable to first test models on a smaller subset of the dataset before applying it to the larger context.
+
+At first a subset of the edx dataset is created, then using a function from the [caret](https://cran.r-project.org/web/packages/caret/vignettes/caret.html) package it will be partitioned into an initial train and test set as below.
+
+```{r, eval=TRUE, include=TRUE}
+# Set seed and Create a subset
+set.seed(10, sample.kind = "Rounding")
+edxsub <- edx %>% sample_n(50000)
+
+# Create data partition
+index <- createDataPartition(edxsub$rating,times = 1, p = 0.8, list = FALSE)
+
+# Use index to create train and test objects
+mvltrain <- edxsub[index,]
+mvltest <- edxsub[-index,]
+mvltest <- mvltest %>% 
+  semi_join(mvltrain, by = "movieId") %>%
+  semi_join(mvltrain, by = "userId")
+
+```
+
+Once the subsets are created the next step is to choose the machine learning model to be applied. The first model applied will be 'Partial least squares' from the [pls](https://cran.r-project.org/web/packages/pls/index.html) package. The model will be called from within the train function of caret which support 238 models at this time. More information is available in this [link](http://topepo.github.io/caret/available-models.html). Prior to training the model the control and tuning parameters will be defined
+
+```{r, eval=TRUE, include=TRUE}
+# Create the control and grid that the training model can use as inputs
+
+control <- trainControl(method = "cv",number = 10, p=0.1)
+grid <- data.frame(ncomp = c(1,2))
+```
+
+
+Once this is done the machine learning model will be trained on the mvltrain subset of edx dataset that was created in the previous step. 
+
+```{r, eval=TRUE, include=TRUE}
+# Train the machine learning model on the training subset of the edx dataset
+plst <- train(rating~movieId+userId, data = mvltrain,
+              method  = "pls",
+              trControl = control,
+              tuneGrid = grid,
+              preProcess = "scale",
+              allowParallel = TRUE)
+
+```
+
+
+The trained algorithm will then be applied on the test subset of the edx dataset for predictions.
+
+```{r, eval=TRUE, include=TRUE}
+# Apply the trained model on the test subset of the edx dataset
+yhatplst <- predict(plst,mvltest)
+```
+
+Once the predictions are available they can be called into the function provided to calculate RMSE
+
+```{r, eval=TRUE, include=TRUE}
+# Calculate RMSE using the function provided
+mvl_RMSE(mvltest$rating,yhatplst)
+```
+
+
+The RMSE calculation achieved was much higher than the threshold set for the project. Changing tuning and control parameters were unsuccessful at significantly reducing the calculated RMSE. Additional models were applied using a similar methodology. These are 'Principal component analysis' from [pls](https://cran.r-project.org/web/packages/pls/index.html) package, 'Robust Linear Model' from the [MASS](https://cran.r-project.org/web/packages/MASS/index.html) package and 'Generalized Additive Model using LOESS' from the [gam](https://cran.r-project.org/web/packages/gam/index.html) package. All models were trained using the train function from caret. The next step taken was to increase the sample size progressively to determine if this change would lead to a significant reduction in RMSE value. However a significant challenge experienced here was the limitation of RAM memory. Using over half of the edx dataset observations in these very quickly started to exhaust system memory and led to system hang ups and crashes. A memory upgrade from 8 to 16 gb RAM solved the problem and allowed use of larger subset of observations however no decrease in RMSE value was noted in any of these runs. 
+
+Early experimentation with k nearest neighbor and random forest models were abandoned as even on relatively small sample sizes the processing time needed and system memory needed were very large. It was deemed highly improbable that such models could be applied successfully on the larger observation set given the computational limitations of a standard laptop. It was clear a different method was necessary to achieve the target RMSE reduction. Matrix factorisation was then explored as a possible solution. Research into this area led to the discovery of the [recosystem](https://cran.r-project.org/web/packages/recosystem/index.html) package. A review of the package documentation suggested that this could indeed solve both the problems of RAM memory usage and the required RMSE reduction.This package uses matrix factorisation as a model and stores objects on disk instead of keeping them in memory. This prevents available RAM memory from being exhausted even when working on very large observations. It also takes advantage of multicore processing and can significantly shorten the time required for model training. The successful implementation of this model on the complete dataset is discussed in detail in the results section.
+
+```{r, eval=TRUE, include=FALSE}
+# Remove memory objects no longer needed
+rm(edxsub,mvltest,mvltrain,plst,yhatplst,control,grid,index)
+```
+
+
+## Results
+
+The application of the recosystem package allowed the analysis to meet the objective of reducing RMSE. The calculated RMSE obtained was 0.78267 and the steps followed are described here. The first step needed is to only keep the columns required for the analysis in both datasets, rename the columns and convert these datasets to a matrix.
+
+```{r, eval=TRUE, include=TRUE}
+# The recosystem package applying matrix factorisation
+# Step 1; SUbset edx and validation retain only the required 3 fields, rename and create matrix
+
+edx1 <-  edx %>% dplyr::select("userId","movieId","rating")
+valid1 <- validation %>% dplyr::select("userId","movieId","rating")
+
+# Rename columns in the newly subsetted files
+names(edx1) <- c("user", "item", "rating")
+names(valid1) <- c("user", "item", "rating")
+
+# Change the files to a matrix
+edx1 <- as.matrix(edx1)
+valid1 <- as.matrix(valid1)
+```
+
+
+The files are then written in tables onto the hard disk
+
+```{r, eval=TRUE, include=TRUE}
+# Step 2; Write the matrix files to tables on disk
+write.table(edx1, file = "train.txt", sep = " ", row.names = FALSE, col.names = FALSE)
+write.table(valid1, file = "test.txt", sep = " ", row.names = FALSE, col.names = FALSE)
+```
+
+Post which data source objects are created that are linked to files written on the disk
+
+
+```{r, eval=TRUE, include=TRUE}
+# Step 3; Use data_file to create a data source object that links the written file
+
+dir <- getwd()
+train <- file.path(dir,"train.txt")
+test <- file.path(dir,"test.txt")
+
+# Use set seed before running data_file
+set.seed(10, sample.kind = "Rounding")
+train_1 <- data_file(train)
+test_1 <- data_file(test)
+```
+
+Once the data source objects are available proceed with creating a reco recommender object and apply tuning parameters. It is recommended to review this [link](https://rdrr.io/cran/recosystem/man/train.html) for parameters needed. The tuning function takes the most amount of time needed however compared to other models previously gaged it runs on the complete training observations in under 15 minutes. Once run it also creates a horizontal completion bar in the console window that starts to fill in as the calculations proceed. It was found to be a very useful feature of this package.
+
+
+```{r, eval=TRUE, include=TRUE}
+# Step 4; Create the reco recommender object and applying tuning parameters to the model
+
+r <- Reco()
+
+# Apply tuning parameters
+
+tparam <- r$tune(train_1, opts = list(dim = c(10, 20, 30), 
+                                      lrate = c(0.1, 0.2),
+                                      costp_l1 = 0,
+                                      costq_l1 = 0,
+                                      nthread = 3,
+                                      niter = 10))
+tparam
+```
+
+After the parameter tuning is completed the model can be trained and predictions made on the test file.
+
+
+```{r, eval=TRUE, include=TRUE}
+# Step 5; Train the recommender model on the train file and make predictions using test
+
+r$train(train_1, opts = c(tparam$min, nthread = 5, niter = 20))
+
+preds = tempfile()
+
+r$predict(test_1, out_file(preds)) 
+```
+
+The last step in the process requires objects to be created to hold both the actual results and the predicted results. Once this is done the provided function can then be used to calculate the RMSE of the model.
+
+
+```{r, eval=TRUE, include=TRUE}
+# Step 6; Assign the actual and predicted ratings to objects and calculate RMSE
+
+actualrat <- read.table("test.txt", header = FALSE, sep = " ")$V3
+predrat <- scan(preds)
+
+reco_RMSE <- mvl_RMSE(actualrat, predrat)
+reco_RMSE
+```
+
+## Conclusions
+
+Application of the recosystem package that is primarily designed as a recommendation system allows the analysis to meet the objective of achieving a root mean square error RMSE of < 0.8649. While this objective is met the model does have limitations as it does not take into account the genre effect. While much lower there is also a effect of ratings over time that this model cannot account for. Future work would require both these predictors to be included. While not present in this dataset there could also be a potential effect of cast on rating predictions and would be worth exploring. 
+
+This project analysis has provided several avenues to apply data science skills and techniques while presenting challenges to be overcome. It has been an invaluable learning experience.
+
+
+This report was created in R using the [R Studio](https://rstudio.com/) IDE and the [R Markdown](https://rmarkdown.rstudio.com/) package
